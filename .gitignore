@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+
+# Generated data and model artifacts (rebuild with: cd ml && uv run rideshare-train)
+ml/data/
+ml/artifacts/
+
+# Secrets
+.env
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store
+
+# Node
+node_modules/
+web/dist/
