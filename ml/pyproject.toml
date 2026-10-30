@@ -9,13 +9,30 @@ dependencies = [
     "pyarrow>=18",
     "torch>=2.5",
     "scikit-learn>=1.5",
+    "scipy>=1.14",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.32",
+    "redis>=5.2",
+    "prometheus-client>=0.21",
 ]
 
 [project.scripts]
 rideshare-train = "rideshare_recs.train:main"
+rideshare-publish-features = "rideshare_recs.serving.publish:main"
+rideshare-abtest = "rideshare_recs.ab_test:main"
+rideshare-bench = "rideshare_recs.serving.bench:main"
 
 [dependency-groups]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "httpx>=0.28"]
+
+# CPU-only PyTorch wheels on Linux (Docker): the default Linux wheel bundles CUDA and is several GB
+[tool.uv.sources]
+torch = [{ index = "pytorch-cpu", marker = "sys_platform == 'linux'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 
 [build-system]
 requires = ["hatchling"]
@@ -26,3 +43,4 @@ packages = ["src/rideshare_recs"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+pythonpath = ["src"]

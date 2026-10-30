@@ -29,13 +29,6 @@ ML_DIR = Path(__file__).resolve().parents[2]
 K = 50   # candidates passed from retrieval to the ranker
 
 
-def _final_ranks(cands: np.ndarray, order_scores: np.ndarray, truth: np.ndarray) -> np.ndarray:
-    order = np.argsort(-order_scores, axis=1, kind="stable")
-    ranked = np.take_along_axis(cands, order, axis=1)
-    hit = ranked == truth[:, None]
-    return np.where(hit.any(1), hit.argmax(1) + 1.0, np.inf)
-
-
 def destination_pipeline(places, riders, trips, args, log) -> tuple[dict, tt.TwoTower, object]:
     ex = destination_examples(trips, riders)
     ex = ex[ex.origin != ex.dest].reset_index(drop=True)
@@ -65,9 +58,9 @@ def destination_pipeline(places, riders, trips, args, log) -> tuple[dict, tt.Two
         results[f"baseline_{kind}"] = ev.ranking_metrics(ev.rank_of_truth(scores, truth))
     results["two_tower"] = ev.ranking_metrics(tt_ranks)
     ranker_scores = rk.rerank(ranker, test_frame, K)
-    final = _final_ranks(test_c, ranker_scores, truth)
+    final = ev.final_ranks(test_c, ranker_scores, truth)
     results["two_tower+ranker"] = ev.ranking_metrics(final)
-    results["retrieval_recall@50"] = float(np.isfinite(_final_ranks(test_c, test_s, truth)).mean())
+    results["retrieval_recall@50"] = float(np.isfinite(ev.final_ranks(test_c, test_s, truth)).mean())
 
     # where the gain comes from: by rider history length
     hist_len = (np.stack(test_ex["hist"].to_numpy()) > 0).sum(1)
@@ -112,7 +105,8 @@ def ride_mode_pipeline(riders, trips, args, log) -> tuple[dict, rm.RideModeModel
                     "dlrm": rm.predict_proba(model, test_b)}.items():
         p = np.where(feasible, p, 0.0)
         results[name] = ev.classification_metrics(p / p.sum(1, keepdims=True), labels)
-    return {"ride_mode": results, "ride_mode_training": history}, model
+    return {"ride_mode": results, "ride_mode_training": history,
+            "ride_mode_global_share": dict(zip(RIDE_MODES, train_mix.round(6).tolist()))}, model
 
 
 def _model_card(metrics: dict, version: str) -> str:
@@ -179,6 +173,10 @@ def main() -> None:
     (out / "metrics.json").write_text(json.dumps(metrics, indent=2))
     (out / "model_card.md").write_text(_model_card(metrics, version))
     (out / "ranker_features.json").write_text(json.dumps(RANKER_FEATURES))
+    (out / "serving_config.json").write_text(json.dumps({
+        "version": version, "candidates": K, "sim_start": cfg.start,
+        "ride_mode_global_share": metrics["ride_mode_global_share"],
+    }, indent=2))
     (args.artifacts / "LATEST").write_text(version)
     log(f"wrote {out}")
     print(_model_card(metrics, version))

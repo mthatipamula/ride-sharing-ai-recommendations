@@ -86,7 +86,7 @@ def to_batch(df: pd.DataFrame, persona_ix: dict[str, int]) -> dict[str, torch.Te
         "dow": torch.as_tensor(df.dow.to_numpy().copy()),
     }
     if "mode" in df:
-        b["mode"] = torch.as_tensor(df["mode"].map({m: i for i, m in enumerate(RIDE_MODES)}).to_numpy())
+        b["mode"] = torch.as_tensor(df["mode"].map({m: i for i, m in enumerate(RIDE_MODES)}).to_numpy().copy())
     return b
 
 

@@ -256,11 +256,15 @@ def make_trips(cfg: SimConfig, places: pd.DataFrame, riders: pd.DataFrame, rng: 
     return _add_ride_modes(trips, places, riders, rng)
 
 
-def surge_for(hour: np.ndarray, dow: np.ndarray, rng: np.random.Generator) -> np.ndarray:
+def surge_for(hour: np.ndarray, dow: np.ndarray, rng: np.random.Generator | None = None) -> np.ndarray:
+    """Demand multiplier by time; with rng, adds the trip-level noise the simulator samples (serving quotes the
+    expected surge)."""
+    hour, dow = np.asarray(hour), np.asarray(dow)
     weekday = dow < 5
     peak = weekday & (((hour >= 7) & (hour <= 9)) | ((hour >= 17) & (hour <= 19)))
     night = ((dow == 4) | (dow == 5)) & (hour >= 22) | ((dow == 5) | (dow == 6)) & (hour <= 2)
-    surge = (1.0 + 0.3 * peak + 0.5 * night) * rng.lognormal(0, 0.12, len(hour))
+    noise = rng.lognormal(0, 0.12, hour.shape) if rng is not None else 1.0
+    surge = (1.0 + 0.3 * peak + 0.5 * night) * noise
     return np.round(np.clip(surge, 1.0, 3.0) * 20) / 20
 
 

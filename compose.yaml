@@ -1,0 +1,39 @@
+# Local stack: Valkey (online feature store), the nightly feature-publish job, and the recommendation service.
+# Train first (cd ml && uv run rideshare-train): models and data are mounted from ml/artifacts and ml/data.
+name: rider-recs
+
+services:
+  valkey:
+    image: valkey/valkey:8.1-alpine
+    command: ["valkey-server", "--save", "", "--appendonly", "no"]   # features are rebuilt from the batch job
+    healthcheck:
+      test: ["CMD", "valkey-cli", "ping"]
+      interval: 2s
+      retries: 30
+    ports: ["127.0.0.1:6379:6379"]
+
+  publish-features:
+    build: ./ml
+    command: ["rideshare-publish-features"]
+    environment:
+      REDIS_URL: redis://valkey:6379/0
+    volumes: ["./ml/data:/app/data:ro"]
+    depends_on:
+      valkey: { condition: service_healthy }
+
+  recsys:
+    build: ./ml
+    environment:
+      REDIS_URL: redis://valkey:6379/0
+      EXPERIMENT_TREATMENT_SHARE: "0.5"
+      CORS_ORIGINS: http://localhost:5173
+    volumes:
+      - ./ml/artifacts:/app/artifacts:ro
+      - ./ml/data:/app/data:ro
+    depends_on:
+      publish-features: { condition: service_completed_successfully }
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health/ready')"]
+      interval: 5s
+      retries: 30
+    ports: ["127.0.0.1:8080:8080"]
