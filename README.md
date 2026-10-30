@@ -5,10 +5,14 @@ and **which ride mode they'll pick** (Wait & Save, Standard, XL, Lux), in real t
 
 A two-stage recommender (**PyTorch two-tower retrieval** with a transformer over trip history, then a **listwise
 neural ranker**) and a **DLRM-style** ride-mode conversion model. They're trained on a synthetic city, evaluated
-offline against strong baselines, and served by a **FastAPI** service backed by a **Redis online feature store**
-with **A/B experiment** assignment. The service answers in about **6 ms at p50**.
+offline against strong baselines, and served by a **FastAPI** service with a **Redis online feature store** and
+**A/B experiments**, behind a **Go API gateway**. A **React** rider app and **Prometheus/Grafana** monitoring with
+drift checks complete the product.
 
-> Independent portfolio project. All data is synthetic; no real rider, trip or company data is used.
+> Independent portfolio project. All data is synthetic; no real rider, trip or company data is used. The demo app's
+> "Waypoint" brand is fictional.
+
+![Rider app](docs/screenshots/rider-app.jpg)
 
 ## Results (test week, 5,000 riders, 385k trips)
 
@@ -48,6 +52,9 @@ the best calibrated (lowest ECE), which matters because the probabilities feed p
 - **Power:** the minimum detectable effect is 1.5% relative at 80% power. About 11.6k riders would be needed to
   detect a 1% lift.
 
+**Live replay** (3,600 test-week trips sampled across the week, through the gateway with `rideshare-replay`): first
+suggestion right **67.1% control, 80.7% treatment**, in line with the offline readout above.
+
 Each training run writes `metrics.json` and a `model_card.md` (full numbers, training curves, feature importance).
 The A/B readout writes `ab_test.json`.
 
@@ -65,12 +72,12 @@ flowchart LR
 
     subgraph ONLINE["Online (serving/)"]
         PUB["Nightly publish job"] --> VK[("Valkey / Redis<br/>online feature store")]
-        APP["📱 Rider app"] --> API["FastAPI recsys<br/>A/B assignment"]
+        APP["📱 React rider app"] --> GW["Go gateway<br/>allow-list · per-rider limit<br/>deadline · breaker"]
+        GW --> API["FastAPI recsys<br/>A/B assignment"]
         API -- "1 round trip" --> VK
         API --> INF["retrieve 50 → rank → top 5<br/>→ ride options"]
-        APP -- "ride completed" --> API
         API -- "real-time counters,<br/>impression / outcome streams" --> VK
-        API --> PROM["/metrics<br/>latency per stage"]
+        API & GW --> PROM["Prometheus + Grafana<br/>latency · live A/B · drift · alerts"]
     end
 
     REG --> INF
@@ -82,7 +89,7 @@ flowchart LR
     classDef obs fill:#cffafe,stroke:#0891b2,color:#164e63
     class SIM,FE,VK,PUB data
     class TT,RK,RM,REG,INF model
-    class APP,API serve
+    class APP,GW,API serve
     class PROM obs
 ```
 
@@ -110,26 +117,48 @@ flowchart LR
 | Experiments | [`serving/experiments.py`](ml/src/rideshare_recs/serving/experiments.py) | Sticky rider-level assignment by `sha256(experiment:rider)`: no assignment table, the same answer on every pod, independent across experiments |
 | Benchmark | [`serving/bench.py`](ml/src/rideshare_recs/serving/bench.py) | Async load test with random riders, pickup points and times; reports p50 / p95 / p99 and throughput |
 
-**Fallbacks:** the app always gets an answer.
-- **Unknown rider:** places popular at this hour near the pickup point (`path: cold_start`).
-- **Feature store down:** popularity only (`path: fallback_no_features`).
-- **Analytics logging fails:** the request still succeeds.
+### Gateway, rider app and monitoring
 
-**Latency** (one container, Docker Desktop on an M-series Mac, client-side, 5,000 riders):
+| Piece | Where | What it does |
+|---|---|---|
+| Go gateway | [`gateway/`](gateway/gateway.go) | The only public entry. Allow-listed routes (`/metrics` and `/docs` return 404), per-rider token bucket (20/s, burst 40) with 429 and `Retry-After`, 250 ms upstream deadline, circuit breaker with a trial request, 64 KB body limit, request IDs, JSON logs, metrics on a separate admin port |
+| Rider app | [`web/`](web/src/App.tsx) | React + TypeScript: pick a rider and moment, see suggestions with reasons on a city map, choose a ride, and request it. Booking updates real-time features, so the next suggestions change. An "Under the hood" panel shows the experiment arm, the serving path and the time per stage |
+| Replay | [`serving/replay.py`](ml/src/rideshare_recs/serving/replay.py) | Replays test-week trips through the gateway as app usage: asks for suggestions, then completes the real trip. This drives the live A/B panels |
+| Dashboards and alerts | [`monitoring/`](monitoring/alerts.yml) | Grafana dashboard (live first-suggestion rate by arm, latency, stage timing, serving path, breaker, PSI) and Prometheus alerts for latency, error rate, an open breaker, fallback rate and drift |
+| Drift report | [`drift.py`](ml/src/rideshare_recs/drift.py) | Population Stability Index per feature, training weeks vs recent traffic, exposed as a metric. `--simulate-shift` injects a demand shock to prove the alarm fires |
 
-| Load | p50 | p95 | p99 | Throughput |
-|---|---|---|---|---|
-| 1 request at a time | 5.7 ms | 7.2 ms | 8.0 ms | 177 req/s |
-| 8 concurrent | 31 ms | 51 ms | 82 ms | 244 req/s |
+![Grafana dashboard](docs/screenshots/grafana.jpg)
 
-One container uses one CPU-bound process, so you scale by adding replicas. The first version built ranker features
-with pandas and ran at 12 ms p50. The NumPy fast path halved that, and the parity test proves it produces the same
-features the ranker was trained on.
+**Failure behaviour, tested by stopping containers:**
+
+| Failure | What the rider gets |
+|---|---|
+| Unknown rider | 200: places popular at this hour near the pickup (`path: cold_start`) |
+| Valkey down | 200 with 5 suggestions from popularity (`path: fallback_no_features`); `/health/ready` returns 503 |
+| Recommendation service down | 502 for the first 5 calls, then the breaker opens and answers 503 immediately |
+| Service too slow | 504 at the 250 ms deadline |
+| Analytics logging fails | The request still succeeds |
+
+Valkey runs without persistence in this stack, so after it restarts, re-run `docker compose up publish-features`.
+
+**Latency** (one service container, Docker Desktop on an M-series Mac, client-side):
+
+| Path | Load | p50 | p95 | p99 | Throughput |
+|---|---|---|---|---|---|
+| Direct to the service | 1 at a time | 5.7 ms | 7.2 ms | 8.0 ms | 177 req/s |
+| Direct to the service | 8 concurrent | 31 ms | 51 ms | 82 ms | 244 req/s |
+| Through the gateway | 1 at a time | 8.6 ms | 11.3 ms | 18 ms | 114 req/s |
+| Through the gateway | 8 concurrent | 56 ms | 87 ms | 111 ms | 146 req/s |
+
+The direct and gateway runs were separate, on a busy laptop, so treat the gap as indicative. The service container
+runs one CPU-bound process, so you scale by adding replicas. The first version built ranker features with pandas and
+ran at 12 ms p50. The NumPy fast path halved that, and the parity test proves it produces the same features the
+ranker was trained on.
 
 Example:
 
 ```bash
-curl -s -X POST localhost:8080/v1/recommendations -H 'content-type: application/json' \
+curl -s -X POST localhost:8090/v1/recommendations -H 'content-type: application/json' \
   -d '{"rider_id": 7, "origin": {"x_km": 8, "y_km": 12}, "at": "2026-10-23T22:30:00"}'
 ```
 ```json
@@ -181,24 +210,38 @@ cd ml
 uv sync
 uv run rideshare-train                # train and evaluate, about 2 minutes on a laptop CPU
 uv run rideshare-abtest               # A/B readout for the latest model
-uv run pytest -q                      # 13 tests, about 10 seconds
+uv run rideshare-drift                # writes the drift report the dashboard shows
+uv run pytest -q                      # 14 tests, about 15 seconds
 ```
 
-Serve it, either fully in Docker (Valkey + the publish job + the service):
+Then start everything from the repo root:
 
 ```bash
-docker compose up -d --build          # from the repo root, after training
-curl -s localhost:8080/health/ready
-cd ml && uv run rideshare-bench --concurrency 8
+docker compose up -d --build
 ```
 
-or locally, without Redis (in-memory feature store, published at startup):
+| What | URL |
+|---|---|
+| Rider app | http://localhost:5180 |
+| Grafana | http://localhost:3100 |
+| Prometheus | http://localhost:9091 |
+| Gateway | http://localhost:8090 |
+
+Fill the dashboard with traffic:
+
+```bash
+cd ml && uv run rideshare-replay --rate 40 --trips 3600
+```
+
+Go gateway tests: `cd gateway && go test -race ./...`
+
+To run only the service, without Docker or Redis (in-memory feature store, published at startup):
 
 ```bash
 cd ml && uv run uvicorn rideshare_recs.serving.app:app --port 8080
 ```
 
-API docs: http://localhost:8080/docs. Outputs land in `ml/artifacts/<version>/` and simulated data in `ml/data/`
+API docs for that local run: http://localhost:8080/docs. Outputs land in `ml/artifacts/<version>/` and simulated data in `ml/data/`
 (both git-ignored).
 
 ## Roadmap
@@ -206,7 +249,7 @@ API docs: http://localhost:8080/docs. Outputs land in `ml/artifacts/<version>/` 
 1. ✅ **ML core:** simulator, two-tower retrieval, listwise ranker, DLRM ride-mode model, offline evaluation
 2. ✅ **Real-time serving:** FastAPI, Redis online feature store, A/B assignment and readout, fallbacks, latency
    benchmark, training/serving parity test
-3. **Product:** Go API gateway, React rider app, Prometheus/Grafana model and latency monitoring, drift checks
+3. ✅ **Product:** Go API gateway, React rider app, Prometheus/Grafana monitoring with alerts, drift checks, live replay
 4. **LLM layer:** Claude explains suggestions ("You usually go to the gym after work on Tuesdays") and handles
    free-text requests, with a timeout fallback to the ranked list
 
