@@ -13,6 +13,14 @@ def rank_of_truth(scores: np.ndarray, truth: np.ndarray) -> np.ndarray:
     return 1.0 + (scores > t).sum(1) + 0.5 * ((scores == t).sum(1) - 1)
 
 
+def final_ranks(cands: np.ndarray, order_scores: np.ndarray, truth: np.ndarray) -> np.ndarray:
+    """1-based rank of the truth after ordering each query's candidates by score; np.inf if it wasn't retrieved."""
+    order = np.argsort(-order_scores, axis=1, kind="stable")
+    ranked = np.take_along_axis(cands, order, axis=1)
+    hit = ranked == truth[:, None]
+    return np.where(hit.any(1), hit.argmax(1) + 1.0, np.inf)
+
+
 def ranking_metrics(ranks: np.ndarray, ks=(1, 3, 10)) -> dict[str, float]:
     """ranks: 1-based, np.inf when the true item was never retrieved."""
     out = {f"recall@{k}": float(np.mean(ranks <= k)) for k in ks}

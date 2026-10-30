@@ -45,14 +45,18 @@ class ListwiseRanker(nn.Module):
         return self.mlp(z).squeeze(-1)
 
 
-def tensors(frame: pd.DataFrame, k: int) -> tuple[torch.Tensor, torch.Tensor]:
-    """(n_queries, k, n_features) and (n_queries, k) from the long candidate frame."""
-    x = frame[NUMERIC].to_numpy(np.float32).copy()
+def _prepare(numeric: np.ndarray) -> np.ndarray:
+    x = numeric.astype(np.float32, copy=True)
     for j, f in enumerate(NUMERIC):
         if f in LOG_SCALED:
             x[:, j] = np.log1p(x[:, j])
-    return (torch.as_tensor(x).view(-1, k, len(NUMERIC)),
-            torch.as_tensor(frame.category.to_numpy()).view(-1, k))
+    return x
+
+
+def tensors(frame: pd.DataFrame, k: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """(n_queries, k, n_features) and (n_queries, k) from the long candidate frame."""
+    return (torch.as_tensor(_prepare(frame[NUMERIC].to_numpy())).view(-1, k, len(NUMERIC)),
+            torch.as_tensor(frame.category.to_numpy().copy()).view(-1, k))
 
 
 def train_ranker(frame: pd.DataFrame, labels: np.ndarray, k: int, epochs: int = 12, batch_size: int = 512,
@@ -98,6 +102,14 @@ def rerank(model: ListwiseRanker, frame: pd.DataFrame, k: int) -> np.ndarray:
     """(n_queries, k) ranker scores aligned with the candidate matrix the frame was built from."""
     x, cat = tensors(frame, k)
     return model.eval()(x, cat).numpy()
+
+
+@torch.no_grad()
+def score_matrix(model: ListwiseRanker, x: np.ndarray) -> np.ndarray:
+    """Scores for one query's candidates from a (k, len(RANKER_FEATURES)) array (the online fast path)."""
+    numeric = x[:, [RANKER_FEATURES.index(f) for f in NUMERIC]]
+    category = torch.as_tensor(x[:, RANKER_FEATURES.index("category")].astype(np.int64))
+    return model.eval()(torch.as_tensor(_prepare(numeric)), category).numpy()
 
 
 @torch.no_grad()

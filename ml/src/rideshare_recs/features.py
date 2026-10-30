@@ -139,3 +139,37 @@ def candidate_features(queries: pd.DataFrame, candidates: np.ndarray, tt_scores:
     df["is_home"] = (rd.home_place_id.loc[df.rider_id].to_numpy() == df.place_id.to_numpy()).astype(np.int8)
     df["is_work"] = (rd.work_place_id.loc[df.rider_id].to_numpy() == df.place_id.to_numpy()).astype(np.int8)
     return df
+
+
+def candidate_features_online(*, hour: int, weekend: int, day: int, origin: int, hist: np.ndarray,
+                              candidates: np.ndarray, tt_scores: np.ndarray, visits: dict, visits_hbucket: dict,
+                              visits_daytype: dict, home: int, work: int, popularity: np.ndarray,
+                              category_hour_lift: np.ndarray, place_category: np.ndarray,
+                              place_xy_km: np.ndarray) -> np.ndarray:
+    """The same features as `candidate_features` for one request, as a (k, len(RANKER_FEATURES)) array, without
+    pandas. A parity test pins it to the offline version, so the fast path can't drift from what the ranker
+    was trained on."""
+    k = len(candidates)
+    hb = int(hour_bucket(hour))
+    out = np.zeros((k, len(RANKER_FEATURES)), dtype=np.float32)
+    col = {f: i for i, f in enumerate(RANKER_FEATURES)}
+    out[:, col["tt_score"]] = tt_scores
+    out[:, col["tt_rank"]] = np.arange(1, k + 1)
+    for j, p in enumerate(candidates.tolist()):
+        total, last_day = visits.get(p, (0, None))
+        out[j, col["visits_total"]] = total
+        out[j, col["visits_hbucket"]] = visits_hbucket.get((p, hb), 0)
+        out[j, col["visits_daytype"]] = visits_daytype.get((p, weekend), 0)
+        out[j, col["days_since_visit"]] = 99 if last_day is None else min(day - last_day, 99)
+    match = hist[None, :] == candidates[:, None]
+    out[:, col["hist_count"]] = match.sum(1)
+    out[:, col["hist_steps_back"]] = np.where(match.any(1), np.argmax(match[:, ::-1], axis=1), HIST_LEN)
+    d = place_xy_km[candidates] - place_xy_km[origin]
+    out[:, col["distance_km"]] = np.hypot(d[:, 0], d[:, 1]) * 1.3 + 0.3
+    out[:, col["popularity"]] = popularity[candidates]
+    cats = place_category[candidates]
+    out[:, col["category"]] = cats
+    out[:, col["category_hour_lift"]] = category_hour_lift[cats, hour]
+    out[:, col["is_home"]] = candidates == home
+    out[:, col["is_work"]] = candidates == work
+    return out

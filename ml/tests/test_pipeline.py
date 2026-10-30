@@ -55,3 +55,38 @@ def test_rank_of_truth_counts_ties_half():
     assert m["recall@1"] == pytest.approx(1 / 3)
     assert m["recall@3"] == pytest.approx(2 / 3)
     assert m["mrr"] == pytest.approx((1 + 1 / 3) / 3)
+
+
+def test_online_fast_path_matches_offline_features(data):
+    """Training/serving parity: the NumPy features the service computes per request equal the pandas features
+    the ranker was trained on, for the same rider, moment and candidates."""
+    from rideshare_recs.features import candidate_features_online, place_arrays
+    from rideshare_recs.serving.feature_store import InMemoryFeatureStore
+    from rideshare_recs.serving.publish import build_payload
+
+    places, riders, trips = data
+    cutoff = 7
+    snap = Snapshot.build(trips, places, cutoff_day=cutoff)
+    store = InMemoryFeatureStore()
+    store.publish(**build_payload(places, riders, trips, cutoff))
+    g = store.global_features()
+    cats, xy = place_arrays(places)
+    pop = np.zeros(len(cats), dtype=np.float32)
+    for p, c in g.popularity.items():
+        pop[p] = c
+
+    ex = destination_examples(trips, riders)
+    q = ex[ex.day >= cutoff].sample(25, random_state=0).reset_index(drop=True)
+    rng = np.random.default_rng(0)
+    cands = np.stack([rng.choice(places.place_id.to_numpy(), 30, replace=False) for _ in range(len(q))])
+    scores = rng.normal(size=cands.shape).astype(np.float32)
+    offline = candidate_features(q, cands, scores, snap, places, riders)[RANKER_FEATURES].to_numpy(np.float32)
+
+    for i, row in q.iterrows():
+        f = store.rider(int(row.rider_id))
+        online = candidate_features_online(
+            hour=int(row.hour), weekend=int(row.weekend), day=int(row.day), origin=int(row.origin),
+            hist=row["hist"], candidates=cands[i], tt_scores=scores[i], visits=f.visits,
+            visits_hbucket=f.visits_hbucket, visits_daytype=f.visits_daytype, home=f.home, work=f.work,
+            popularity=pop, category_hour_lift=g.category_hour_lift, place_category=cats, place_xy_km=xy * 20.0)
+        np.testing.assert_allclose(online, offline[i * 30:(i + 1) * 30], rtol=1e-4, atol=1e-3)
