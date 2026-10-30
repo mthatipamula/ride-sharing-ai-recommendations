@@ -7,6 +7,7 @@ DATA_DIR, so it runs with no other process.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import time
@@ -37,6 +38,7 @@ STAGE_LATENCY = Histogram("recs_stage_latency_seconds", "Latency per pipeline st
 REQUESTS = Counter("recs_requests_total", "Recommendation responses", ["endpoint", "variant", "path"])
 FEEDBACK = Counter("recs_ride_completed_total", "Completed rides reported", ["variant", "suggested_rank"])
 MODEL_INFO = Gauge("recs_model_info", "Loaded model version", ["version"])
+FEATURE_PSI = Gauge("recs_feature_psi", "Population stability index from the latest drift report", ["feature"])
 
 
 class Origin(BaseModel):
@@ -93,6 +95,10 @@ async def lifespan(app: FastAPI):
         log.warning("feature snapshot was empty; published %s", info)
     rec = Recommender(latest_artifact_dir(_artifacts_root()), store)
     MODEL_INFO.labels(rec.version).set(1)
+    drift = rec.dir / "drift_report.json"
+    if drift.exists():
+        for feature, v in json.loads(drift.read_text())["features"].items():
+            FEATURE_PSI.labels(feature).set(v["psi"])
     app.state.rec, app.state.store, app.state.experiment = rec, store, Experiment.from_env()
     app.state.recent = {}                                    # request_id -> what was shown (bounded)
     yield

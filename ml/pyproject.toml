@@ -14,6 +14,7 @@ dependencies = [
     "uvicorn[standard]>=0.32",
     "redis>=5.2",
     "prometheus-client>=0.21",
+    "httpx>=0.28",
 ]
 
 [project.scripts]
@@ -21,9 +22,11 @@ rideshare-train = "rideshare_recs.train:main"
 rideshare-publish-features = "rideshare_recs.serving.publish:main"
 rideshare-abtest = "rideshare_recs.ab_test:main"
 rideshare-bench = "rideshare_recs.serving.bench:main"
+rideshare-replay = "rideshare_recs.serving.replay:main"
+rideshare-drift = "rideshare_recs.drift:main"
 
 [dependency-groups]
-dev = ["pytest>=8", "httpx>=0.28"]
+dev = ["pytest>=8"]
 
 # CPU-only PyTorch wheels on Linux (Docker): the default Linux wheel bundles CUDA and is several GB
 [tool.uv.sources]

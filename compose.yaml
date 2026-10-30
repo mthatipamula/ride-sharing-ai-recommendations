@@ -1,4 +1,4 @@
-# Local stack: Valkey (online feature store), the nightly feature-publish job, and the recommendation service.
+# Local stack: rider app -> Go gateway -> recommendation service -> Valkey (online feature store), plus monitoring.
 # Train first (cd ml && uv run rideshare-train): models and data are mounted from ml/artifacts and ml/data.
 name: rider-recs
 
@@ -10,7 +10,7 @@ services:
       test: ["CMD", "valkey-cli", "ping"]
       interval: 2s
       retries: 30
-    ports: ["127.0.0.1:6379:6379"]
+    ports: ["127.0.0.1:6380:6379"]
 
   publish-features:
     build: ./ml
@@ -26,7 +26,6 @@ services:
     environment:
       REDIS_URL: redis://valkey:6379/0
       EXPERIMENT_TREATMENT_SHARE: "0.5"
-      CORS_ORIGINS: http://localhost:5173
     volumes:
       - ./ml/artifacts:/app/artifacts:ro
       - ./ml/data:/app/data:ro
@@ -36,4 +35,37 @@ services:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8080/health/ready')"]
       interval: 5s
       retries: 30
-    ports: ["127.0.0.1:8080:8080"]
+
+  gateway:
+    build: ./gateway
+    environment:
+      UPSTREAM_URL: http://recsys:8080
+      RIDER_RATE_PER_SEC: "20"
+      RIDER_BURST: "40"
+    depends_on:
+      recsys: { condition: service_healthy }
+    ports: ["127.0.0.1:8090:8090"]
+
+  web:
+    build: ./web
+    depends_on: [gateway]
+    ports: ["127.0.0.1:5180:8080"]
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+    ports: ["127.0.0.1:9091:9090"]
+
+  grafana:
+    image: grafana/grafana:12.0.0
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/rider-recommendations.json
+    volumes:
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    depends_on: [prometheus]
+    ports: ["127.0.0.1:3100:3000"]

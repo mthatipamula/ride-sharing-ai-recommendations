@@ -90,3 +90,12 @@ def test_online_fast_path_matches_offline_features(data):
             visits_hbucket=f.visits_hbucket, visits_daytype=f.visits_daytype, home=f.home, work=f.work,
             popularity=pop, category_hour_lift=g.category_hour_lift, place_category=cats, place_xy_km=xy * 20.0)
         np.testing.assert_allclose(online, offline[i * 30:(i + 1) * 30], rtol=1e-4, atol=1e-3)
+
+
+def test_psi_is_zero_for_same_data_and_flags_a_shift(data):
+    from rideshare_recs.drift import psi_categorical, psi_numeric, report
+
+    places, _, trips = data
+    assert psi_numeric(trips.distance_km, trips.distance_km, 10) == pytest.approx(0, abs=1e-9)
+    assert psi_categorical(trips["mode"], trips["mode"]) == pytest.approx(0, abs=1e-9)
+    assert psi_numeric(trips.distance_km, trips.distance_km * 3, 10) > 0.25

@@ -1,0 +1,27 @@
+groups:
+  - name: rider-recommendations
+    rules:
+      - alert: RecommendationsLatencyHigh
+        expr: histogram_quantile(0.95, sum by (le) (rate(gateway_request_duration_seconds_bucket{route="recommendations"}[5m]))) > 0.1
+        for: 5m
+        labels: { severity: page }
+        annotations: { summary: "Recommendations p95 above the 100 ms budget" }
+      - alert: GatewayErrorRateHigh
+        expr: sum(rate(gateway_requests_total{status=~"5.."}[5m])) / sum(rate(gateway_requests_total[5m])) > 0.01
+        for: 5m
+        labels: { severity: page }
+        annotations: { summary: "More than 1% of requests are failing" }
+      - alert: UpstreamBreakerOpen
+        expr: gateway_breaker_open == 1
+        for: 1m
+        labels: { severity: page }
+        annotations: { summary: "Gateway circuit breaker is open: the recommendation service is failing" }
+      - alert: ServingFallbackHigh
+        expr: sum(rate(recs_requests_total{path="fallback_no_features"}[5m])) / sum(rate(recs_requests_total{endpoint="recommendations"}[5m])) > 0.05
+        for: 5m
+        labels: { severity: warn }
+        annotations: { summary: "Over 5% of responses are popularity fallbacks: check the feature store" }
+      - alert: FeatureDrift
+        expr: max(recs_feature_psi) > 0.25
+        labels: { severity: warn }
+        annotations: { summary: "A feature's PSI is above 0.25: investigate and consider retraining" }
